@@ -1,9 +1,9 @@
 {
-  "id": "share-cf",
-  "name": "Share CF",
+  "id": "obsidian-share-cf",
+  "name": "Obsidian Share (CF)",
   "version": "1.0.0",
   "minAppVersion": "1.5.0",
-  "description": "Share Obsidian notes through stable Cloudflare Worker links backed by D1 and R2.",
+  "description": "Share Obsidian notes through stable Cloudflare Worker links backed by D1 and R2. Free to use. Easy to self host",
   "author": "BigT",
   "authorUrl": "https://github.com/nurtasin",
   "isDesktopOnly": false
