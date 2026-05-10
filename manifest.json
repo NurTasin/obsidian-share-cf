@@ -1,7 +1,7 @@
 {
   "id": "share-cf",
   "name": "Share CF",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "minAppVersion": "1.5.0",
   "description": "Share Obsidian notes through stable Cloudflare Worker links backed by D1 and R2.",
   "author": "BigT",
