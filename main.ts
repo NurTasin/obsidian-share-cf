@@ -18,8 +18,56 @@ interface SharedNoteRecord {
   url: string;
   path: string;
   title: string;
+  assets?: Record<string, SharedAssetRecord>;
   lastSyncedHash?: string;
   lastSyncedAt?: number;
+}
+
+interface SharedAssetRecord {
+  assetId: string;
+  contentHash: string;
+  fileName: string;
+}
+
+interface UploadAsset {
+  assetId: string;
+  originalPath: string;
+  fileName: string;
+  contentType: string;
+  contentHash: string;
+  sizeBytes: number;
+  dataBase64: string;
+}
+
+interface PreparedUpload {
+  content: string;
+  contentHash: string;
+  assets: UploadAsset[];
+  assetRecords: Record<string, SharedAssetRecord>;
+}
+
+interface ImageReferenceMatch {
+  originalReference: string;
+  target: string;
+  toReference: (url: string) => string;
+}
+
+interface PublicNotePayload {
+  shareId: string;
+  path?: string;
+  title?: string;
+  content: string;
+  assets?: PublicAssetPayload[];
+}
+
+interface PublicAssetPayload {
+  assetId: string;
+  originalPath: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  contentHash: string;
+  url: string;
 }
 
 interface ShareCfSettings {
@@ -61,7 +109,7 @@ export default class ShareCfPlugin extends Plugin {
     this.addCommand({
       id: "sync-shared-notes",
       name: "Sync shared notes now",
-      callback: () => this.syncDirtyNotes(true)
+      callback: () => this.syncAll(true)
     });
 
     this.registerObsidianProtocolHandler("sharecf", (params) => {
@@ -164,6 +212,11 @@ export default class ShareCfPlugin extends Plugin {
     }
   }
 
+  async syncAll(showNotice: boolean) {
+    await this.syncDirtyNotes(showNotice);
+    await this.syncImportedNotes(showNotice);
+  }
+
   async unshare(path: string) {
     const record = this.settings.sharedNotes[path];
     if (!record) return;
@@ -190,10 +243,10 @@ export default class ShareCfPlugin extends Plugin {
       };
     }
 
-    const content = await this.app.vault.cachedRead(file);
-    const contentHash = await sha256Hex(content);
+    const originalContent = await this.app.vault.cachedRead(file);
+    const prepared = await this.prepareUpload(file, originalContent, record.assets ?? {});
 
-    if (!forceCreate && record.lastSyncedHash === contentHash) {
+    if (!forceCreate && record.lastSyncedHash === prepared.contentHash) {
       return record;
     }
 
@@ -201,8 +254,9 @@ export default class ShareCfPlugin extends Plugin {
       noteId: record.noteId,
       path: file.path,
       title: this.titleForFile(file),
-      content,
-      contentHash,
+      content: prepared.content,
+      contentHash: prepared.contentHash,
+      assets: prepared.assets,
       updatedAt: new Date(file.stat.mtime).toISOString()
     });
 
@@ -214,7 +268,8 @@ export default class ShareCfPlugin extends Plugin {
       url: payload.url,
       path: file.path,
       title: this.titleForFile(file),
-      lastSyncedHash: contentHash,
+      assets: prepared.assetRecords,
+      lastSyncedHash: prepared.contentHash,
       lastSyncedAt: Date.now()
     };
 
@@ -277,7 +332,96 @@ export default class ShareCfPlugin extends Plugin {
     return response;
   }
 
-  private async importSharedNote(params: ObsidianProtocolData) {
+  private async prepareUpload(file: TFile, content: string, previousAssets: Record<string, SharedAssetRecord>): Promise<PreparedUpload> {
+    const assets: UploadAsset[] = [];
+    const assetRecords: Record<string, SharedAssetRecord> = {};
+    let rewritten = content;
+    const replacements = await this.collectImageReplacements(file, content, previousAssets);
+
+    for (const replacement of replacements) {
+      rewritten = rewritten.split(replacement.originalReference).join(replacement.rewrittenReference);
+      assets.push(replacement.asset);
+      assetRecords[replacement.asset.originalPath] = {
+        assetId: replacement.asset.assetId,
+        contentHash: replacement.asset.contentHash,
+        fileName: replacement.asset.fileName
+      };
+    }
+
+    const assetHashInput = assets
+      .map((asset) => `${asset.originalPath}:${asset.assetId}:${asset.contentHash}`)
+      .sort()
+      .join("|");
+
+    return {
+      content: rewritten,
+      contentHash: await sha256Hex(`${rewritten}\n${assetHashInput}`),
+      assets,
+      assetRecords
+    };
+  }
+
+  private async collectImageReplacements(file: TFile, content: string, previousAssets: Record<string, SharedAssetRecord>) {
+    const replacements: Array<{ originalReference: string; rewrittenReference: string; asset: UploadAsset }> = [];
+    const seen = new Set<string>();
+    const matches = [
+      ...findWikiImageMatches(content),
+      ...findMarkdownImageMatches(content)
+    ];
+
+    for (const match of matches) {
+      if (seen.has(match.originalReference)) continue;
+      seen.add(match.originalReference);
+
+      const assetFile = this.resolveLinkedFile(file, match.target);
+      if (!assetFile || !isImageFile(assetFile)) continue;
+
+      const data = await this.app.vault.readBinary(assetFile);
+      const contentHash = await sha256ArrayBuffer(data);
+      const previous = previousAssets[assetFile.path];
+      const extension = extensionForPath(assetFile.path);
+      const assetId = previous?.contentHash === contentHash
+        ? previous.assetId
+        : `${crypto.randomUUID()}${extension}`;
+      const fileName = assetId;
+      const contentType = contentTypeForPath(assetFile.path);
+
+      replacements.push({
+        originalReference: match.originalReference,
+        rewrittenReference: match.toReference(`share-cf-asset://${assetId}`),
+        asset: {
+          assetId,
+          originalPath: assetFile.path,
+          fileName,
+          contentType,
+          contentHash,
+          sizeBytes: data.byteLength,
+          dataBase64: arrayBufferToBase64(data)
+        }
+      });
+    }
+
+    return replacements;
+  }
+
+  private resolveLinkedFile(note: TFile, target: string): TFile | null {
+    const cleanTarget = target
+      .split("#", 1)[0]
+      .split("|", 1)[0]
+      .trim()
+      .replace(/^<(.+)>$/, "$1");
+    if (!cleanTarget || /^[a-z][a-z0-9+.-]*:/i.test(cleanTarget)) return null;
+
+    const direct = this.app.metadataCache.getFirstLinkpathDest(cleanTarget, note.path);
+    if (direct instanceof TFile) return direct;
+
+    const parent = note.parent?.path && note.parent.path !== "/" ? note.parent.path : "";
+    const relativePath = normalizeVaultPath(parent ? `${parent}/${cleanTarget}` : cleanTarget);
+    const relative = this.app.vault.getAbstractFileByPath(relativePath);
+    return relative instanceof TFile ? relative : null;
+  }
+
+  async importSharedNote(params: ObsidianProtocolData) {
     if (params.mode !== "import") return;
 
     const shareId = asString(params.shareId);
@@ -297,26 +441,49 @@ export default class ShareCfPlugin extends Plugin {
         throw new Error(response.text || `Import failed with HTTP ${response.status}.`);
       }
 
-      const payload = response.json as {
-        shareId: string;
-        path?: string;
-        title?: string;
-        content: string;
-      };
+      const payload = response.json as PublicNotePayload;
 
       const existingPath = this.settings.importedNotes[shareId];
       const existingFile = existingPath ? this.app.vault.getAbstractFileByPath(existingPath) : null;
       let destinationPath = existingFile instanceof TFile
         ? existingFile.path
         : await this.uniqueImportPath(payload.path, payload.title);
+      const assetFolder = `Imported Shared Notes/_assets/${shareId}`;
+      let importedContent = payload.content;
+
+      for (const asset of payload.assets ?? []) {
+        const assetPath = `${assetFolder}/${sanitizeFileName(asset.fileName || asset.assetId)}`;
+        await this.ensureParentFolder(assetPath);
+        const assetResponse = await requestUrl({
+          url: `${workerUrl}${asset.url}`,
+          method: "GET"
+        });
+        if (assetResponse.status < 200 || assetResponse.status >= 300) {
+          throw new Error(assetResponse.text || `Image import failed with HTTP ${assetResponse.status}.`);
+        }
+
+        const existingAsset = this.app.vault.getAbstractFileByPath(assetPath);
+        if (existingAsset instanceof TFile) {
+          await this.app.vault.modifyBinary(existingAsset, assetResponse.arrayBuffer);
+        } else {
+          await this.app.vault.createBinary(assetPath, assetResponse.arrayBuffer);
+        }
+
+        const localReference = encodeURI(relativePathBetween(destinationPath, assetPath));
+        importedContent = importedContent
+          .split(asset.url)
+          .join(localReference)
+          .split(`${workerUrl}${asset.url}`)
+          .join(localReference);
+      }
 
       await this.ensureParentFolder(destinationPath);
       const file = this.app.vault.getAbstractFileByPath(destinationPath);
 
       if (file instanceof TFile) {
-        await this.app.vault.modify(file, payload.content);
+        await this.app.vault.modify(file, importedContent);
       } else {
-        await this.app.vault.create(destinationPath, payload.content);
+        await this.app.vault.create(destinationPath, importedContent);
       }
 
       this.settings.importedNotes[shareId] = destinationPath;
@@ -327,6 +494,51 @@ export default class ShareCfPlugin extends Plugin {
       new Notice(error instanceof Error ? error.message : "Could not pull shared note.");
       console.error("Share CF: import failed", error);
     }
+  }
+
+  async syncImportedNotes(showNotice: boolean) {
+    const entries = Object.entries(this.settings.importedNotes);
+    if (entries.length === 0) {
+      if (showNotice) new Notice("No imported shared notes to pull.");
+      return;
+    }
+
+    let pulled = 0;
+    let removed = 0;
+    for (const [shareId, path] of entries) {
+      if (!(this.app.vault.getAbstractFileByPath(path) instanceof TFile)) {
+        delete this.settings.importedNotes[shareId];
+        removed += 1;
+        continue;
+      }
+
+      await this.importSharedNote({
+        action: "sharecf",
+        mode: "import",
+        shareId,
+        workerUrl: this.settings.workerUrl
+      });
+      pulled += 1;
+    }
+
+    if (removed > 0) {
+      await this.saveSettings();
+    }
+
+    if (showNotice) {
+      const pulledText = `Pulled ${pulled} imported shared note${pulled === 1 ? "" : "s"}.`;
+      const removedText = removed > 0 ? ` Removed ${removed} missing entr${removed === 1 ? "y" : "ies"}.` : "";
+      new Notice(`${pulledText}${removedText}`);
+    }
+  }
+
+  async untrackImportedNote(shareId: string) {
+    const path = this.settings.importedNotes[shareId];
+    if (!path) return;
+
+    delete this.settings.importedNotes[shareId];
+    await this.saveSettings();
+    new Notice(`Stopped syncing ${path}.`);
   }
 
   private async uniqueImportPath(originalPath?: string, title?: string): Promise<string> {
@@ -385,11 +597,24 @@ export default class ShareCfPlugin extends Plugin {
 
   private async onVaultDelete(file: TAbstractFile) {
     const record = this.settings.sharedNotes[file.path];
-    if (!record) return;
+    let changed = false;
 
-    this.dirtyPaths.delete(file.path);
-    delete this.settings.sharedNotes[file.path];
-    await this.saveSettings();
+    if (record) {
+      this.dirtyPaths.delete(file.path);
+      delete this.settings.sharedNotes[file.path];
+      changed = true;
+    }
+
+    for (const [shareId, path] of Object.entries(this.settings.importedNotes)) {
+      if (path === file.path) {
+        delete this.settings.importedNotes[shareId];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await this.saveSettings();
+    }
   }
 
   private titleForFile(file: TFile) {
@@ -463,15 +688,16 @@ class ShareCfSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync now")
-      .setDesc("Push all queued changes for notes that are already shared.")
+      .setDesc("Push queued local share changes and pull updates for imported shared notes.")
       .addButton((button) =>
         button
           .setButtonText("Sync")
           .setCta()
-          .onClick(() => this.plugin.syncDirtyNotes(true))
+          .onClick(() => this.plugin.syncAll(true))
       );
 
     this.renderSharedNotes(containerEl);
+    this.renderImportedNotes(containerEl);
   }
 
   private renderSharedNotes(containerEl: HTMLElement) {
@@ -517,6 +743,64 @@ class ShareCfSettingTab extends PluginSettingTab {
         );
     }
   }
+
+  private renderImportedNotes(containerEl: HTMLElement) {
+    containerEl.find(".share-cf-imported-notes")?.remove();
+    const section = containerEl.createDiv({ cls: "share-cf-imported-notes" });
+    section.createEl("h3", { text: "Pulled documents" });
+    const list = section.createDiv({ cls: "share-cf-note-list" });
+    let pruned = false;
+    const records = Object.entries(this.plugin.settings.importedNotes).filter(([shareId, path]) => {
+      if (this.plugin.app.vault.getAbstractFileByPath(path) instanceof TFile) return true;
+      delete this.plugin.settings.importedNotes[shareId];
+      pruned = true;
+      return false;
+    });
+    if (pruned) {
+      this.plugin.saveSettings();
+    }
+
+    if (records.length === 0) {
+      list.createDiv({ cls: "share-cf-status", text: "No pulled documents yet." });
+      return;
+    }
+
+    for (const [shareId, path] of records.sort((a, b) => a[1].localeCompare(b[1]))) {
+      const row = list.createDiv({ cls: "share-cf-note-row" });
+      row.createDiv({ cls: "share-cf-note-path", text: path });
+      new Setting(row)
+        .addButton((button) =>
+          button
+            .setIcon("refresh-cw")
+            .setTooltip("Pull latest server copy")
+            .onClick(async () => {
+              button.setDisabled(true);
+              try {
+                await this.plugin.importSharedNote({
+                  action: "sharecf",
+                  mode: "import",
+                  shareId,
+                  workerUrl: this.plugin.settings.workerUrl
+                });
+                this.renderImportedNotes(containerEl);
+              } catch (error) {
+                button.setDisabled(false);
+                new Notice(error instanceof Error ? error.message : "Could not pull imported note.");
+                console.error("Share CF: pull imported note failed", error);
+              }
+            })
+        )
+        .addButton((button) =>
+          button
+            .setIcon("x")
+            .setTooltip("Stop syncing this pulled document")
+            .onClick(async () => {
+              await this.plugin.untrackImportedNote(shareId);
+              this.renderImportedNotes(containerEl);
+            })
+        );
+    }
+  }
 }
 
 class ShareLinkModal extends Modal {
@@ -555,6 +839,118 @@ function sanitizeMarkdownPath(originalPath?: string, title?: string): string {
   }
 
   return safeParts.join("/");
+}
+
+function findWikiImageMatches(content: string): ImageReferenceMatch[] {
+  const matches: ImageReferenceMatch[] = [];
+  const regex = /!\[\[([^\]]+)\]\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content))) {
+    const originalReference = match[0];
+    const target = match[1];
+    matches.push({
+      originalReference,
+      target,
+      toReference: (url) => `![](${url})`
+    });
+  }
+  return matches;
+}
+
+function findMarkdownImageMatches(content: string): ImageReferenceMatch[] {
+  const matches: ImageReferenceMatch[] = [];
+  const regex = /!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content))) {
+    const originalReference = match[0];
+    const alt = match[1];
+    const rawTarget = match[2].trim();
+    const target = rawTarget.replace(/\s+"[^"]*"$/, "");
+    matches.push({
+      originalReference,
+      target,
+      toReference: (url) => `![${alt}](${url})`
+    });
+  }
+  return matches;
+}
+
+function isImageFile(file: TFile): boolean {
+  return /\.(apng|avif|gif|jpe?g|png|svg|webp)$/i.test(file.path);
+}
+
+function extensionForPath(path: string): string {
+  const match = path.match(/\.([a-z0-9]+)$/i);
+  return match ? `.${match[1].toLowerCase()}` : ".bin";
+}
+
+function contentTypeForPath(path: string): string {
+  const extension = extensionForPath(path);
+  switch (extension) {
+    case ".apng":
+      return "image/apng";
+    case ".avif":
+      return "image/avif";
+    case ".gif":
+      return "image/gif";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+async function sha256ArrayBuffer(buffer: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function normalizeVaultPath(path: string): string {
+  const parts: string[] = [];
+  for (const part of path.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function sanitizeFileName(value: string): string {
+  return value.trim().replace(/[<>:"/\\|?*#^[\]]/g, "-") || `${crypto.randomUUID()}.bin`;
+}
+
+function relativePathBetween(fromFile: string, toFile: string): string {
+  const fromParts = fromFile.split("/").slice(0, -1);
+  const toParts = toFile.split("/");
+
+  while (fromParts.length > 0 && toParts.length > 0 && fromParts[0] === toParts[0]) {
+    fromParts.shift();
+    toParts.shift();
+  }
+
+  const prefix = fromParts.map(() => "..");
+  return [...prefix, ...toParts].join("/") || toFile;
 }
 
 async function sha256Hex(value: string): Promise<string> {

@@ -56,6 +56,8 @@ Apply the schema:
 corepack pnpm --filter obsidian-share-cf-worker run db:migrate:remote
 ```
 
+If you are upgrading an existing deployment, make sure the `0002_note_assets.sql` migration has run. It adds the asset metadata table used to track images referenced by shared notes.
+
 Run locally:
 
 ```bash
@@ -72,9 +74,13 @@ Copy the deployed Worker URL into **Settings -> Share CF -> Worker URL** in Obsi
 
 ## Usage
 
-Open a Markdown note and run **Share current note** from the command palette or ribbon icon. The plugin uploads the note, copies the share link, and remembers that file. When a shared note changes, it is queued and synced every 30 minutes by default. You can run **Sync shared notes now** at any time.
+Open a Markdown note and run **Share current note** from the command palette or ribbon icon. The plugin uploads a rewritten copy of the note, copies the share link, and remembers that file. Your original local note is not modified. When a shared note changes, it is queued and synced every 30 minutes by default. You can run **Sync shared notes now** at any time.
+
+Image embeds are uploaded separately to R2. Share CF supports Obsidian wiki embeds like `![[image.png]]` and standard Markdown embeds like `![](image.png)`. Uploaded image objects receive randomized UUID filenames to avoid collisions, and the public copy of the Markdown is rewritten to reference those R2-backed image URLs. If an image is removed from the note, the next sync removes the no-longer-used image from R2.
 
 Public share pages include a **Pull into Obsidian** button. When clicked, Obsidian imports the Markdown into `Imported Shared Notes/`. Clicking the same import link again updates the imported copy instead of creating another duplicate.
+
+Pulled notes include their images. Images are downloaded into `Imported Shared Notes/_assets/{shareId}/`, and the imported Markdown is rewritten to use those local image files. Running **Sync shared notes now** also pulls the latest server copy for imported shared notes, so recipients can manually refresh notes and images after the uploader syncs changes. The settings panel lists pulled documents and automatically removes a pulled document from the local sync list if its local file has been deleted.
 
 Deleting a local note removes only the local tracking entry. Use the Share CF settings tab to disable an existing public link.
 
@@ -85,6 +91,7 @@ Deleting a local note removes only the local tracking entry. Use the Share CF se
 - `GET /api/notes`: lists active shared notes for the authenticated vault.
 - `DELETE /api/notes/:noteId`: disables a share link and deletes the R2 object.
 - `GET /api/public/notes/:shareId`: returns the latest public Markdown payload for Obsidian imports.
+- `GET /assets/:shareId/:assetId`: serves an uploaded image asset for a public shared note.
 - `GET /s/:shareId`: renders the latest public note.
 
 ## Security Notes

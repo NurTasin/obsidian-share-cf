@@ -18,6 +18,17 @@ interface UpsertNoteBody {
   content: string;
   contentHash: string;
   updatedAt?: string;
+  assets?: UpsertAssetBody[];
+}
+
+interface UpsertAssetBody {
+  assetId: string;
+  originalPath: string;
+  fileName: string;
+  contentType: string;
+  contentHash: string;
+  sizeBytes: number;
+  dataBase64: string;
 }
 
 interface VaultRow {
@@ -37,6 +48,16 @@ interface NoteRow {
   is_deleted: number;
   created_at: string;
   updated_at: string;
+}
+
+interface AssetRow {
+  asset_id: string;
+  r2_key: string;
+  original_path: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  content_hash: string;
 }
 
 const encoder = new TextEncoder();
@@ -79,6 +100,11 @@ export default {
       const shareMatch = url.pathname.match(/^\/s\/([^/]+)$/);
       if (shareMatch && request.method === "GET") {
         return renderSharedNote(env, decodeURIComponent(shareMatch[1]), url);
+      }
+
+      const assetMatch = url.pathname.match(/^\/assets\/([^/]+)\/([^/]+)$/);
+      if (assetMatch && request.method === "GET") {
+        return serveAsset(env, decodeURIComponent(assetMatch[1]), decodeURIComponent(assetMatch[2]));
       }
 
       const publicNoteMatch = url.pathname.match(/^\/api\/public\/notes\/([^/]+)$/);
@@ -132,9 +158,11 @@ async function upsertNote(request: Request, env: Env, vault: VaultRow, url: URL)
 
   const shareId = existing?.share_id ?? randomSlug();
   const r2Key = existing?.r2_key ?? `notes/${vault.id}/${body.noteId}.md`;
-  const contentBytes = encoder.encode(body.content);
+  const assets = body.assets ?? [];
+  const storedContent = rewriteAssetPlaceholders(body.content, shareId);
+  const contentBytes = encoder.encode(storedContent);
 
-  await env.NOTES.put(r2Key, body.content, {
+  await env.NOTES.put(r2Key, storedContent, {
     httpMetadata: {
       contentType: "text/markdown; charset=utf-8"
     },
@@ -173,6 +201,8 @@ async function upsertNote(request: Request, env: Env, vault: VaultRow, url: URL)
       )
       .run();
   }
+
+  await upsertAssets(env, vault, body.noteId, shareId, assets, now);
 
   return json({
     noteId: body.noteId,
@@ -223,6 +253,7 @@ async function deleteNote(env: Env, vault: VaultRow, noteId: string): Promise<Re
     .bind(new Date().toISOString(), vault.id, noteId)
     .run();
   await env.NOTES.delete(row.r2_key);
+  await deleteNoteAssets(env, vault.id, noteId);
 
   return json({ ok: true });
 }
@@ -247,6 +278,33 @@ async function renderSharedNote(env: Env, shareId: string, url: URL): Promise<Re
   return html(renderPage(note.title, markdownRenderer.render(markdown), note.updated_at, importIntoObsidianUrl(env, url, shareId)));
 }
 
+async function serveAsset(env: Env, shareId: string, assetId: string): Promise<Response> {
+  const asset = await env.DB.prepare(
+    `SELECT note_assets.*
+     FROM note_assets
+     INNER JOIN notes ON notes.vault_id = note_assets.vault_id AND notes.id = note_assets.note_id
+     WHERE notes.share_id = ? AND notes.is_deleted = 0 AND note_assets.asset_id = ?`
+  )
+    .bind(shareId, assetId)
+    .first<AssetRow>();
+
+  if (!asset) {
+    return text("Not found", 404);
+  }
+
+  const object = await env.NOTES.get(asset.r2_key);
+  if (!object) {
+    return text("Not found", 404);
+  }
+
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": asset.content_type,
+      "Cache-Control": "public, max-age=31536000, immutable"
+    }
+  });
+}
+
 async function getPublicNote(env: Env, shareId: string): Promise<Response> {
   const note = await env.DB.prepare(
     `SELECT * FROM notes WHERE share_id = ? AND is_deleted = 0`
@@ -263,13 +321,107 @@ async function getPublicNote(env: Env, shareId: string): Promise<Response> {
     throw new HttpError(404, "Note unavailable.");
   }
 
+  const { results: assets } = await env.DB.prepare(
+    `SELECT asset_id, original_path, file_name, content_type, size_bytes, content_hash
+     FROM note_assets
+     WHERE vault_id = ? AND note_id = ?
+     ORDER BY original_path COLLATE NOCASE`
+  )
+    .bind(note.vault_id, note.id)
+    .all<Pick<AssetRow, "asset_id" | "original_path" | "file_name" | "content_type" | "size_bytes" | "content_hash">>();
+
   return json({
     shareId,
     path: note.path,
     title: note.title,
     content: await object.text(),
-    updatedAt: note.updated_at
+    updatedAt: note.updated_at,
+    assets: assets.map((asset) => ({
+      assetId: asset.asset_id,
+      originalPath: asset.original_path,
+      fileName: asset.file_name,
+      contentType: asset.content_type,
+      sizeBytes: asset.size_bytes,
+      contentHash: asset.content_hash,
+      url: `/assets/${encodeURIComponent(shareId)}/${encodeURIComponent(asset.asset_id)}`
+    }))
   });
+}
+
+async function upsertAssets(env: Env, vault: VaultRow, noteId: string, shareId: string, assets: UpsertAssetBody[], now: string) {
+  const keep = new Set<string>();
+
+  for (const asset of assets) {
+    validateAsset(asset);
+    keep.add(asset.assetId);
+
+    const bytes = base64ToBytes(asset.dataBase64);
+    if (bytes.byteLength !== asset.sizeBytes) {
+      throw new HttpError(400, `Asset ${asset.originalPath} size does not match payload.`);
+    }
+
+    const r2Key = `assets/${vault.id}/${noteId}/${asset.assetId}`;
+    await env.NOTES.put(r2Key, bytes, {
+      httpMetadata: {
+        contentType: asset.contentType
+      },
+      customMetadata: {
+        vaultId: vault.id,
+        noteId,
+        shareId,
+        originalPath: asset.originalPath,
+        contentHash: asset.contentHash
+      }
+    });
+
+    await env.DB.prepare(
+      `INSERT INTO note_assets
+       (vault_id, note_id, asset_id, r2_key, original_path, file_name, content_type, size_bytes, content_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(vault_id, note_id, asset_id) DO UPDATE SET
+         r2_key = excluded.r2_key,
+         original_path = excluded.original_path,
+         file_name = excluded.file_name,
+         content_type = excluded.content_type,
+         size_bytes = excluded.size_bytes,
+         content_hash = excluded.content_hash,
+         updated_at = excluded.updated_at`
+    )
+      .bind(vault.id, noteId, asset.assetId, r2Key, asset.originalPath, asset.fileName, asset.contentType, asset.sizeBytes, asset.contentHash, now, now)
+      .run();
+  }
+
+  const { results: existingAssets } = await env.DB.prepare(
+    `SELECT asset_id, r2_key FROM note_assets WHERE vault_id = ? AND note_id = ?`
+  )
+    .bind(vault.id, noteId)
+    .all<Pick<AssetRow, "asset_id" | "r2_key">>();
+
+  for (const asset of existingAssets) {
+    if (keep.has(asset.asset_id)) continue;
+    await env.NOTES.delete(asset.r2_key);
+    await env.DB.prepare(
+      `DELETE FROM note_assets WHERE vault_id = ? AND note_id = ? AND asset_id = ?`
+    )
+      .bind(vault.id, noteId, asset.asset_id)
+      .run();
+  }
+}
+
+async function deleteNoteAssets(env: Env, vaultId: string, noteId: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT asset_id, r2_key FROM note_assets WHERE vault_id = ? AND note_id = ?`
+  )
+    .bind(vaultId, noteId)
+    .all<Pick<AssetRow, "asset_id" | "r2_key">>();
+
+  for (const asset of results) {
+    await env.NOTES.delete(asset.r2_key);
+  }
+
+  await env.DB.prepare(`DELETE FROM note_assets WHERE vault_id = ? AND note_id = ?`)
+    .bind(vaultId, noteId)
+    .run();
 }
 
 async function authenticate(request: Request, env: Env): Promise<VaultRow> {
@@ -311,6 +463,20 @@ function validateNoteBody(body: UpsertNoteBody) {
   if (!body.title || body.title.length > 300) throw new HttpError(400, "title is required and must be under 300 characters.");
   if (typeof body.content !== "string") throw new HttpError(400, "content is required.");
   if (!/^[a-f0-9]{64}$/i.test(body.contentHash)) throw new HttpError(400, "contentHash must be a SHA-256 hex digest.");
+  if (body.assets !== undefined && !Array.isArray(body.assets)) throw new HttpError(400, "assets must be an array.");
+}
+
+function validateAsset(asset: UpsertAssetBody) {
+  if (!asset || typeof asset !== "object") throw new HttpError(400, "Each asset must be an object.");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[a-z0-9]+$/i.test(asset.assetId)) {
+    throw new HttpError(400, "assetId must be a UUID filename with an extension.");
+  }
+  if (!asset.originalPath || asset.originalPath.length > 1024) throw new HttpError(400, "asset originalPath is required.");
+  if (!asset.fileName || asset.fileName.length > 260) throw new HttpError(400, "asset fileName is required.");
+  if (!asset.contentType || asset.contentType.length > 100) throw new HttpError(400, "asset contentType is required.");
+  if (!/^[a-f0-9]{64}$/i.test(asset.contentHash)) throw new HttpError(400, "asset contentHash must be a SHA-256 hex digest.");
+  if (!Number.isInteger(asset.sizeBytes) || asset.sizeBytes < 0) throw new HttpError(400, "asset sizeBytes must be a positive integer.");
+  if (!asset.dataBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(asset.dataBase64)) throw new HttpError(400, "asset dataBase64 is required.");
 }
 
 async function readJson<T>(request: Request): Promise<T> {
@@ -382,6 +548,21 @@ function importIntoObsidianUrl(env: Env, url: URL, shareId: string): string {
     workerUrl: publicBaseUrl(env, url)
   });
   return `obsidian://sharecf?${params.toString()}`;
+}
+
+function rewriteAssetPlaceholders(content: string, shareId: string): string {
+  return content.replace(/share-cf-asset:\/\/([0-9a-f-]+\.[a-z0-9]+)/gi, (_match, assetId: string) => (
+    `/assets/${encodeURIComponent(shareId)}/${encodeURIComponent(assetId)}`
+  ));
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function escapeHtml(value: string): string {
