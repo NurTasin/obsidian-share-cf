@@ -1,6 +1,6 @@
 {
   "id": "share-notes-cf",
-  "name": "Share Notes (CF)",
+  "name": "Share Notes (Cloudflare)",
   "version": "1.0.0",
   "minAppVersion": "1.5.0",
   "description": "Share notes through stable Cloudflare Worker links backed by D1 and R2. Free to use. Easy to self host!",
