@@ -1,0 +1,26 @@
+.share-cf-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.share-cf-note-list {
+  margin-top: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.share-cf-note-row {
+  align-items: center;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 0;
+}
+
+.share-cf-note-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

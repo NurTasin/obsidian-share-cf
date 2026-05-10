@@ -1,0 +1,24 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "obsidian-share-cf",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-05-10",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "obsidian-share-cf",
+			"database_id": "36f64f6e-507a-4033-b887-60a766fbbc95",
+			"remote": true
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "NOTES",
+			"bucket_name": "obsidian-share-cf-notes",
+			"remote": true
+		}
+	],
+	"vars": {
+		"PUBLIC_BASE_URL": ""
+	}
+}

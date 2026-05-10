@@ -1,0 +1,7 @@
+node_modules/
+main.js
+data.json
+.wrangler/
+dist/
+worker/node_modules/
+worker/worker-configuration.d.ts

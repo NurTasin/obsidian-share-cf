@@ -1,0 +1,28 @@
+{
+  "name": "obsidian-share-cf",
+  "version": "0.1.0",
+  "description": "Share Obsidian notes through stable Cloudflare-backed links.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "cloudflare",
+    "d1",
+    "r2"
+  ],
+  "author": "BigT <https://github.com/nurtasin>",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.5.12",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.5"
+  },
+  "packageManager": "pnpm@11.0.9+sha512.34ce82e6780233cf9cad8685029a8f81d2e06196c5a9bad98879f7424940c6817c4e4524fb7d38b8553ceed48b9758b8ebaf1abd3600c232c4c8cf7366086f38"
+}
