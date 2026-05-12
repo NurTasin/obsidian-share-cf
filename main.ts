@@ -97,39 +97,49 @@ export default class ShareCfPlugin extends Plugin {
     await this.loadSettings();
 
     this.addRibbonIcon("share-2", "Share current note", () => {
-      this.shareActiveNote();
+      void this.shareActiveNote();
     });
 
     this.addCommand({
       id: "share-current-note",
       name: "Share current note",
-      callback: () => this.shareActiveNote()
+      callback: () => {
+        void this.shareActiveNote();
+      }
     });
 
     this.addCommand({
       id: "sync-shared-notes",
       name: "Sync shared notes now",
-      callback: () => this.syncAll(true)
+      callback: () => {
+        void this.syncAll(true);
+      }
     });
 
     this.registerObsidianProtocolHandler("sharecf", (params) => {
-      this.importSharedNote(params);
+      void this.importSharedNote(params);
     });
     this.registerObsidianProtocolHandler("share-cf", (params) => {
-      this.importSharedNote(params);
+      void this.importSharedNote(params);
     });
 
     this.addSettingTab(new ShareCfSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(this.app.vault.on("modify", (file) => this.onVaultModify(file)));
-      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.onVaultRename(file, oldPath)));
-      this.registerEvent(this.app.vault.on("delete", (file) => this.onVaultDelete(file)));
+      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+        void this.onVaultRename(file, oldPath);
+      }));
+      this.registerEvent(this.app.vault.on("delete", (file) => {
+        void this.onVaultDelete(file);
+      }));
     });
 
     this.registerInterval(
       window.setInterval(
-        () => this.syncDirtyNotes(false),
+        () => {
+          void this.syncDirtyNotes(false);
+        },
         Math.max(1, this.settings.syncIntervalMinutes) * 60 * 1000
       )
     );
@@ -172,12 +182,12 @@ export default class ShareCfPlugin extends Plugin {
 
   async syncDirtyNotes(showNotice: boolean) {
     if (this.syncInFlight) {
-      if (showNotice) new Notice("Share CF sync is already running.");
+      if (showNotice) new Notice("Sync is already running.");
       return;
     }
 
     if (!this.settings.workerUrl) {
-      if (showNotice) new Notice("Set your Cloudflare Worker URL first.");
+      if (showNotice) new Notice("Set your worker URL first.");
       return;
     }
 
@@ -205,7 +215,7 @@ export default class ShareCfPlugin extends Plugin {
 
       if (showNotice) new Notice(`Synced ${synced} shared note${synced === 1 ? "" : "s"}.`);
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : "Share CF sync failed.");
+      new Notice(error instanceof Error ? error.message : "Sync failed.");
       console.error("Share CF: sync failed", error);
     } finally {
       this.syncInFlight = false;
@@ -280,7 +290,7 @@ export default class ShareCfPlugin extends Plugin {
 
   private async ensureRegistered() {
     if (!this.settings.workerUrl) {
-      throw new Error("Set your Cloudflare Worker URL in Share CF settings first.");
+      throw new Error("Set your worker url in Share CF settings first.");
     }
 
     if (this.settings.vaultId && this.settings.clientToken) {
@@ -427,7 +437,7 @@ export default class ShareCfPlugin extends Plugin {
     const shareId = asString(params.shareId);
     const workerUrl = normalizeWorkerUrl(asString(params.workerUrl) || this.settings.workerUrl);
     if (!shareId || !workerUrl) {
-      new Notice("Share CF import link is missing note details.");
+      new Notice("Import link is missing note details.");
       return;
     }
 
@@ -447,7 +457,7 @@ export default class ShareCfPlugin extends Plugin {
       const existingFile = existingPath ? this.app.vault.getAbstractFileByPath(existingPath) : null;
       let destinationPath = existingFile instanceof TFile
         ? existingFile.path
-        : await this.uniqueImportPath(payload.path, payload.title);
+        : this.uniqueImportPath(payload.path, payload.title);
       const assetFolder = `Imported Shared Notes/_assets/${shareId}`;
       let importedContent = payload.content;
 
@@ -541,7 +551,7 @@ export default class ShareCfPlugin extends Plugin {
     new Notice(`Stopped syncing ${path}.`);
   }
 
-  private async uniqueImportPath(originalPath?: string, title?: string): Promise<string> {
+  private uniqueImportPath(originalPath?: string, title?: string): string {
     const basePath = `Imported Shared Notes/${sanitizeMarkdownPath(originalPath, title)}`;
     if (!this.app.vault.getAbstractFileByPath(basePath)) {
       return basePath;
@@ -641,11 +651,11 @@ class ShareCfSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Share CF" });
+    new Setting(containerEl).setName("Share CF").setHeading();
 
     new Setting(containerEl)
-      .setName("Worker URL")
-      .setDesc("The Cloudflare Worker URL used for sharing. You can replace the default with your own Worker.")
+      .setName("Worker url")
+      .setDesc("The Cloudflare worker url used for sharing. You can replace the default with your own worker.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.workerUrl)
@@ -658,7 +668,7 @@ class ShareCfSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync interval")
-      .setDesc("How often shared notes with local changes are pushed to Cloudflare.")
+      .setDesc("How often shared notes with local changes are pushed to the worker.")
       .addText((text) =>
         text
           .setPlaceholder("30")
@@ -693,7 +703,9 @@ class ShareCfSettingTab extends PluginSettingTab {
         button
           .setButtonText("Sync")
           .setCta()
-          .onClick(() => this.plugin.syncAll(true))
+          .onClick(() => {
+            void this.plugin.syncAll(true);
+          })
       );
 
     this.renderSharedNotes(containerEl);
@@ -703,7 +715,7 @@ class ShareCfSettingTab extends PluginSettingTab {
   private renderSharedNotes(containerEl: HTMLElement) {
     containerEl.find(".share-cf-shared-notes")?.remove();
     const section = containerEl.createDiv({ cls: "share-cf-shared-notes" });
-    section.createEl("h3", { text: "Shared notes" });
+    new Setting(section).setName("Shared notes").setHeading();
     const list = section.createDiv({ cls: "share-cf-note-list" });
     const records = Object.values(this.plugin.settings.sharedNotes);
 
@@ -747,7 +759,7 @@ class ShareCfSettingTab extends PluginSettingTab {
   private renderImportedNotes(containerEl: HTMLElement) {
     containerEl.find(".share-cf-imported-notes")?.remove();
     const section = containerEl.createDiv({ cls: "share-cf-imported-notes" });
-    section.createEl("h3", { text: "Pulled documents" });
+    new Setting(section).setName("Pulled documents").setHeading();
     const list = section.createDiv({ cls: "share-cf-note-list" });
     let pruned = false;
     const records = Object.entries(this.plugin.settings.importedNotes).filter(([shareId, path]) => {
@@ -757,7 +769,7 @@ class ShareCfSettingTab extends PluginSettingTab {
       return false;
     });
     if (pruned) {
-      this.plugin.saveSettings();
+      void this.plugin.saveSettings();
     }
 
     if (records.length === 0) {
@@ -811,7 +823,7 @@ class ShareLinkModal extends Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Share link" });
+    new Setting(contentEl).setName("Share link").setHeading();
     contentEl.createEl("p", { text: "Copy this link:" });
     contentEl.createEl("input", { value: this.url, attr: { readonly: "true" } });
   }
@@ -821,8 +833,8 @@ function normalizeWorkerUrl(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
 
-function asString(value: string | "true" | undefined): string {
-  return typeof value === "string" && value !== "true" ? value : "";
+function asString(value: string | undefined): string {
+  return value ?? "";
 }
 
 function sanitizeMarkdownPath(originalPath?: string, title?: string): string {
